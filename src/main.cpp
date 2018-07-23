@@ -3,6 +3,7 @@
 #include <uWS/uWS.h>
 #include <chrono>
 #include <iostream>
+#include <algorithm>
 #include <thread>
 #include <limits>
 #include <vector>
@@ -170,19 +171,26 @@ std::vector<int> sort_indices(const std::vector<double> &v) {
 
 double get_distance_ahead_on_track(const double s0, const double s1, const double track_length) {
 
-  assert(s0>=0.0);
-  assert(s0<=track_length);
-  assert(s1>=0.0);
-  assert(s1<=track_length);
-  
   double s1p = s1;
-  if(s1p<s0) {
+  while(s1p<s0) {
     s1p+=track_length;
   }
-  
-  assert(s1p>=s0);
-
   return s1p-s0;
+
+}
+
+double get_relative_s(const double s0, const double s1, const double track_length) {
+
+  double diff = s1 - s0;
+
+  while(diff<-0.5*track_length) {
+    diff += track_length;
+  }
+  while(diff>0.5*track_length) {
+    diff -= track_length;
+  }
+  
+  return diff;
 
 }
 
@@ -239,13 +247,218 @@ std::vector<int> prioritize_lanes(const int car_current_lane, const std::vector<
 
   std::vector<double> modified_exit_speed_by_lane = exit_speed_by_lane;
   modified_exit_speed_by_lane[car_current_lane] += speed_verse_changing_lane_preference;                   //favor staying in current lane
-  if(car_current_lane>0) modified_exit_speed_by_lane[car_current_lane-1] += 0.5*speed_verse_changing_lane_preference;  //favor changing only one lane
+  if(car_current_lane>0) modified_exit_speed_by_lane[car_current_lane-1] += 0.5*speed_verse_changing_lane_preference;  //favor changing to faster lane
   if(car_current_lane<num_lanes-1) modified_exit_speed_by_lane[car_current_lane+1] += 0.25*speed_verse_changing_lane_preference; // favor changing only one lane
 
   std::vector<int> prioritized_lanes = sort_indices(modified_exit_speed_by_lane);
 
   return prioritized_lanes;
 
+}
+
+
+std::pair<std::vector<double>,std::vector<double> > continue_to_lane(const int target_lane, 
+            const std::vector<double>& previous_path_x,
+            const std::vector<double>& previous_path_y,
+            const double future_car_x,
+            const double future_car_y,
+            const double future_car_yaw,
+            const double future_car_s,
+            const double future_car_d,
+            const double future_car_speed,
+            const int proposed_path_length,
+            const double time_step,
+            const double maximum_speed_control,
+            const double maximum_acceleration_control,
+            const double maximum_jerk_control,
+            const double safe_following_distance,
+            const std::vector<std::vector<double>>& sensor_fusion,
+            const double lane_width,
+            const double track_length,
+            const std::vector<double>& map_waypoints_s,
+            const std::vector<double>& map_waypoints_x,
+            const std::vector<double>& map_waypoints_y) {
+
+  // std::cout << "continue_to_lane ..." << std::endl;
+
+  std::vector<double> target_path_x;
+  std::vector<double> target_path_y;
+
+    // generate the points that will go into the spline
+  std::vector<double> ptsx;
+  std::vector<double> ptsy;
+
+  const int prev_size = previous_path_x.size();
+  double ref_x = future_car_x;
+  double ref_y = future_car_y;
+  double ref_yaw = future_car_yaw;
+  double ref_speed = future_car_speed;
+
+  // prime the pump on the spline with the last previously requested points
+  if(prev_size<2) {  // we have less than two points in our history
+    const double prev_car_x = future_car_x - cos(future_car_yaw);
+    const double prev_car_y = future_car_y - sin(future_car_yaw);
+    ptsx.push_back(prev_car_x);
+    ptsy.push_back(prev_car_y);
+    ptsx.push_back(future_car_x);
+    ptsy.push_back(future_car_y);
+
+  } 
+  else {  // add the last two previously requested points to get us started
+    double ref_x_prev = previous_path_x[prev_size-2];
+    double ref_y_prev = previous_path_y[prev_size-2];
+    ptsx.push_back(ref_x_prev);
+    ptsy.push_back(ref_y_prev);
+    ptsx.push_back(ref_x);
+    ptsy.push_back(ref_y);
+  }
+
+   // now we get to add new points in the XY frame
+  std::vector<double> next_wp0 = getXY(future_car_s + 35.0,lane_width*(0.5+target_lane),map_waypoints_s,map_waypoints_x,map_waypoints_y);
+  std::vector<double> next_wp1 = getXY(future_car_s + 65.0,lane_width*(0.5+target_lane),map_waypoints_s,map_waypoints_x,map_waypoints_y);
+  std::vector<double> next_wp2 = getXY(future_car_s + 95.0,lane_width*(0.5+target_lane),map_waypoints_s,map_waypoints_x,map_waypoints_y);
+
+  ptsx.push_back(next_wp0[0]);
+  ptsy.push_back(next_wp0[1]);
+  ptsx.push_back(next_wp1[0]);
+  ptsy.push_back(next_wp1[1]);
+  ptsx.push_back(next_wp2[0]);
+  ptsy.push_back(next_wp2[1]);
+
+  // shift points to local xy frame of the car
+  for(int i=0;i<ptsx.size(); ++i) {
+    double shift_x = ptsx[i]-ref_x;
+    double shift_y = ptsy[i]-ref_y;
+    ptsx[i] =  shift_x * cos(ref_yaw) + shift_y*sin(ref_yaw);
+    ptsy[i] = -shift_x * sin(ref_yaw) + shift_y*cos(ref_yaw);
+  }
+
+  //create the spline
+  tk::spline xyspline;
+  xyspline.set_points(ptsx,ptsy);    
+
+  const double target_x = 30.0;
+  const double target_y = xyspline(target_x);
+  const double target_distance = hypot(target_x,target_y);
+
+  // start off at the end of the previous path
+  double current_x_global = ref_x;
+  double current_y_global = ref_y;
+
+  double current_x_local = 0.0;
+  double current_y_local = 0.0;
+
+  for(int i=1;i<=proposed_path_length-prev_size;++i) {  //for each point into the future
+
+    // Determine acceleration
+
+    // find the next obstacle in our lane
+    double min_distance_ahead = std::numeric_limits<double>::infinity();
+    double speed_of_next_threat = std::numeric_limits<double>::infinity();
+    for(int tt=0;tt<sensor_fusion.size();++tt) {
+      const double threat_d = sensor_fusion[tt][6];
+      const int threat_lane = int(threat_d/lane_width);
+      if(threat_lane==target_lane) {
+        std::vector<double> ego_sd = getFrenet(current_x_global, current_y_global, ref_yaw, map_waypoints_x, map_waypoints_y);
+        const double ego_s = ego_sd[0];
+        const double ego_d = ego_sd[1];
+        const double threat_s0 = sensor_fusion[tt][5];
+        const double threat_vx = sensor_fusion[tt][3];
+        const double threat_vy = sensor_fusion[tt][4];
+        const double threat_speed = hypot(threat_vx,threat_vy);
+        const double threat_s = threat_s0 + i*time_step*threat_speed;
+        const double distance_ahead = get_distance_ahead_on_track(ego_s,threat_s,track_length);
+        if(distance_ahead<min_distance_ahead) {
+          min_distance_ahead = distance_ahead;
+          speed_of_next_threat = threat_speed;
+        }
+      }
+    }
+
+    // adjust our speed accordingly
+    double safe_stopping_distance = safe_following_distance + (speed_of_next_threat-ref_speed)*(speed_of_next_threat-ref_speed)/(maximum_acceleration_control);
+
+    if(safe_stopping_distance>min_distance_ahead) {   //we need to slow down
+      if(ref_speed>speed_of_next_threat) {
+        ref_speed -= time_step * 0.5*maximum_acceleration_control;
+      }
+      else {
+        ref_speed += time_step * 0.5*maximum_acceleration_control;
+      }
+    }
+    else {
+      ref_speed += time_step * 0.5*maximum_acceleration_control;
+    }
+    ref_speed = std::max(ref_speed,0.0);
+    ref_speed = std::min(ref_speed,maximum_speed_control);  // always ensure that we obey speed limit
+
+    const double N = target_distance / (time_step*ref_speed);
+    current_x_local += target_x/N;
+    current_y_local = xyspline(current_x_local);
+
+    //shift back to global XY frame
+    current_x_global = ref_x + current_x_local*cos(ref_yaw)-current_y_local*sin(ref_yaw);
+    current_y_global = ref_y + current_x_local*sin(ref_yaw)+current_y_local*cos(ref_yaw);
+
+    target_path_x.push_back(current_x_global);
+    target_path_y.push_back(current_y_global);
+
+  }
+
+  // std::cout << "continue_to_lane ... OK" << std::endl;
+
+  return std::make_pair(target_path_x,target_path_y);
+
+}
+
+
+double look_if_faster_lane_is_safe(const int future_car_lane, const double future_car_s, const double future_car_speed, 
+  const double future_delta_t, const std::vector<int>& prioritized_lanes, std::vector<std::vector<double>> sensor_fusion, const double track_length, const double lane_width) {
+
+  int next_lane_selection = future_car_lane;  //default lane selection
+
+  for(int ll=0;ll<prioritized_lanes.size();++ll) {        // look through list of prioritized lanes
+    int candidate_lane = prioritized_lanes[ll];     // this is our candidate lane
+
+    if(candidate_lane==future_car_lane) {
+      break;
+    }
+
+    if(abs(candidate_lane-future_car_lane)==2) {
+      candidate_lane = 1;
+    } 
+
+    if(abs(candidate_lane-future_car_lane)==1) {          // only look at adjacent lanes
+      bool lane_is_safe = true;
+      for(int tt=0;tt<sensor_fusion.size();++tt) {        // look at each threat
+        
+        const double threat_d = sensor_fusion[tt][6]; 
+        const int threat_lane = int(threat_d/lane_width);
+        if(threat_lane==candidate_lane) {  
+
+          const double threat_s = sensor_fusion[tt][5];
+          const double threat_vx = sensor_fusion[tt][3];
+          const double threat_vy = sensor_fusion[tt][4];
+          const double threat_speed = hypot(threat_vx,threat_vy);
+          const double threat_future_s = threat_s + future_delta_t * threat_speed;
+
+
+                     // is this threat in the candidate lane
+          const double relative_s = get_relative_s(future_car_s,threat_future_s,track_length);
+          if(relative_s>-10 and relative_s<20) {
+            lane_is_safe = false;
+            break;
+          }
+        }
+      }
+      if(lane_is_safe) {
+        next_lane_selection = candidate_lane;
+        break;
+      }
+    }
+  }
+
+  return next_lane_selection;
 }
 
 
@@ -263,8 +476,15 @@ int main() {
   const double time_step = 0.02;
 
   // vehicle control parameters
-  const double maximum_speed = 49.5;
-  const double look_ahead_distance = 500.0;
+  const int proposed_path_length = 50;
+  const double maximum_speed_control = 49.6 * 1609.34 / 3600.0;
+  const double maximum_acceleration_control = 9.0;
+  const double maximum_jerk_control = 9.0;
+  const double safe_following_distance = 15.0;
+  const double look_ahead_distance = 200.0;
+
+  // Initial state for FSM
+  int current_target_lane = 1;
 
   /////////////////////////////////////////////////////
   // MAP 
@@ -299,7 +519,7 @@ int main() {
   // SOCKET CALLBACK
 
   uWS::Hub h;
-  h.onMessage([&look_ahead_distance,&lane_width,&track_length,&maximum_speed,&time_step,
+  h.onMessage([&current_target_lane,&safe_following_distance,&maximum_jerk_control,&maximum_acceleration_control,&look_ahead_distance,&lane_width,&track_length,&maximum_speed_control,&time_step,
     &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
    uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
@@ -342,149 +562,98 @@ int main() {
           // Sensor Fusion Data, a list of all other cars on the same side of the road.
           std::vector<std::vector<double> > sensor_fusion = j[1]["sensor_fusion"];
 
+          ///////////////////////////////////////////////////////////////////////////
+          // Vectors for points to return to simulator
+          std::vector<double> next_x_vals;
+          std::vector<double> next_y_vals;
+
+          // Add points from the previous path 
+          for(int i = 0; i < prev_size; ++i) {
+            next_x_vals.push_back(previous_path_x[i]);
+            next_y_vals.push_back(previous_path_y[i]);
+          }
+
           ////////////////////////////////////////////////////////////////////////////
-          const int car_current_lane = int(car_d/lane_width);
-
+          // Analyze the current car state
+          double future_car_x = car_x;
+          double future_car_y = car_y;
+          double future_car_yaw = car_yaw;
           double future_car_s = car_s;
+          double future_car_d = car_d;
+          double future_car_speed = car_speed;
           if(prev_size > 0) {
-          future_car_s = end_path_s;
+            future_car_x = previous_path_x[prev_size-1];
+            future_car_y = previous_path_y[prev_size-1];
+            future_car_s = end_path_s;
+            future_car_d = end_path_d;
           }     
+          if(prev_size > 1) {
+            const double x1 = previous_path_x[prev_size-1];
+            const double x0 = previous_path_x[prev_size-2];
+            const double y1 = previous_path_y[prev_size-1];
+            const double y0 = previous_path_y[prev_size-2];
+            future_car_yaw = atan2(y1-y0,x1-x0);
+            future_car_speed = hypot(x1-x0,y1-y0) / time_step;
+          }
 
+          const int future_car_lane = int(future_car_d/lane_width);
+          const double future_delta_t = time_step * prev_size;
+
+          /////////////////////////////////////////////////////////////////////////////
           // Analyze current traffic conditions
           std::vector<double> minimum_distance_to_blockage;
           std::vector<double> exit_speed_by_lane;
           std::tie(minimum_distance_to_blockage,exit_speed_by_lane) = analyze_traffic_in_each_lane(sensor_fusion, 
-          car_s, num_lanes, lane_width, track_length, 
-          look_ahead_distance, maximum_speed);
+              future_car_s, num_lanes, lane_width, track_length, look_ahead_distance, maximum_speed_control);
 
-          //order the lanes by optimality: fastest to slowest,  if a tie for fastest, use current lane.
-          std::vector<int> prioritized_lanes = prioritize_lanes(car_current_lane,exit_speed_by_lane,minimum_distance_to_blockage);
-          
+
+
+          //////////////////////////////////////////////////////////////////////////////////
+          // Order the lanes by optimality: fastest to slowest
+          std::vector<int> prioritized_lanes = prioritize_lanes(future_car_lane,exit_speed_by_lane,minimum_distance_to_blockage);
           std::cout << "Lane " << prioritized_lanes[0] << " is fastest" << std::endl;
 
-          int car_desired_lane = car_current_lane;
-          for(int kk=0;kk<num_lanes;++kk) {
-            const int candidate_lane = prioritized_lanes[kk];
-
-            if(abs(candidate_lane-car_current_lane)<2) {
-              if(minimum_distance_to_blockage[candidate_lane]>20.0) {
-                car_desired_lane = candidate_lane; 
-                break;
-              }
-              else {
-                std::cout << "can't move to lane " << candidate_lane << std::endl;
-                std::cout << "minimum_distance_to_blockage : " << minimum_distance_to_blockage[car_desired_lane] << std::endl;
-              }
+          /////////////////////////////////////////////////////////////////////////////////
+          // Decide which lane to target
+          if(future_car_lane==current_target_lane) {
+            const double goal_error = fabs(end_path_d - (current_target_lane+0.5)*lane_width);
+            if(goal_error<0.5) {     // we have arrived in the lane. Do we want another lane?
+              current_target_lane = look_if_faster_lane_is_safe(future_car_lane, future_car_s, future_car_speed, future_delta_t, prioritized_lanes, sensor_fusion, track_length, lane_width);
+              if(current_target_lane!=future_car_lane) std::cout << "Switching from lane " << future_car_lane << " to " << current_target_lane << std::endl;
             }
           }
 
+          ////////////////////////////////////////////////////////////////////////////////
+          // Move towards the targeted lane
+          std::vector<double> candidate_path_x;
+          std::vector<double> candidate_path_y;
+          std::tie(candidate_path_x,candidate_path_y) = continue_to_lane(current_target_lane, previous_path_x, previous_path_y,
+              future_car_x,
+              future_car_y,
+              future_car_yaw,
+              future_car_s,
+              future_car_d,
+              future_car_speed,
+              proposed_path_length,
+              time_step,
+              maximum_speed_control,
+              maximum_acceleration_control,
+              maximum_jerk_control,
+              safe_following_distance,
+              sensor_fusion,
+              lane_width,
+              track_length,
+              map_waypoints_s,
+              map_waypoints_x,
+              map_waypoints_y);
 
-        // const double acceleration_required = 
+          //////////////////////////////////////////////////////////////////////////////////
+          // Add the proposed path onto the list of next values
+          next_x_vals.insert(next_x_vals.end(),candidate_path_x.begin(), candidate_path_x.end());
+          next_y_vals.insert(next_y_vals.end(),candidate_path_y.begin(), candidate_path_y.end());
 
-         const double ref_vel = 49.5;
-
-         std::vector<double> ptsx;
-         std::vector<double> ptsy;
-
-         double ref_x = car_x;
-         double ref_y = car_y;
-         double ref_yaw = deg2rad(car_yaw);
-
-         if(prev_size<2) {
-
-          const double prev_car_x = car_x - cos(car_yaw);
-          const double prev_car_y = car_y - sin(car_yaw);
-
-          ptsx.push_back(prev_car_x);
-          ptsx.push_back(car_x);
-
-          ptsy.push_back(prev_car_y);
-          ptsy.push_back(car_y);
-
-
-        } else {
-
-          ref_x = previous_path_x[prev_size-1];
-          ref_y = previous_path_y[prev_size-1];
-
-          double ref_x_prev = previous_path_x[prev_size-2];
-          double ref_y_prev = previous_path_y[prev_size-2];
-
-          ref_yaw = atan2(ref_y-ref_y_prev,ref_x-ref_x_prev);
-
-          ptsx.push_back(ref_x_prev);
-          ptsx.push_back(ref_x);
-
-          ptsy.push_back(ref_y_prev);
-          ptsy.push_back(ref_y);
-
-         }
-
-         std::vector<double> next_wp0 = getXY(future_car_s + 30.0,2+4*car_desired_lane,map_waypoints_s,map_waypoints_x,map_waypoints_y);
-         std::vector<double> next_wp1 = getXY(future_car_s + 60.0,2+4*car_desired_lane,map_waypoints_s,map_waypoints_x,map_waypoints_y);
-         std::vector<double> next_wp2 = getXY(future_car_s + 90.0,2+4*car_desired_lane,map_waypoints_s,map_waypoints_x,map_waypoints_y);
-
-         ptsx.push_back(next_wp0[0]);
-         ptsx.push_back(next_wp1[0]);
-         ptsx.push_back(next_wp2[0]);
-
-         ptsy.push_back(next_wp0[1]);
-         ptsy.push_back(next_wp1[1]);
-         ptsy.push_back(next_wp2[1]);
-
-
-         for(int i=0;i<ptsx.size(); ++i) {
-
-          double shift_x = ptsx[i]-ref_x;
-          double shift_y = ptsy[i]-ref_y;
-
-          ptsx[i] = (shift_x * cos(0.0-ref_yaw)-shift_y*sin(0.0-ref_yaw));
-          ptsy[i] = (shift_x * sin(0.0-ref_yaw)+shift_y*cos(0.0-ref_yaw));
-
-         }
-
-         tk::spline s;
-         s.set_points(ptsx,ptsy);    // currently it is required that X is already sorted
-
-         vector<double> next_x_vals;
-         vector<double> next_y_vals;
-
-         for(int i = 0; i < previous_path_x.size(); ++i) {
-          next_x_vals.push_back(previous_path_x[i]);
-          next_y_vals.push_back(previous_path_y[i]);
-         }
-
-         const double target_x = 30.0;
-         const double target_y = s(target_x);
-         const double target_dist = hypot(target_x,target_y);
-         double x_add_on = 0.0;
-
-         for(int i=1;i<=50-previous_path_x.size();++i) {
-
-          const double N = target_dist / (time_step*ref_vel/2.24);
-          double x_point = x_add_on + target_x/N;
-          double y_point = s(x_point);
-
-          x_add_on = x_point;
-
-          const double x_ref = x_point;
-          const double y_ref = y_point;
-
-          x_point = x_ref*cos(ref_yaw)-y_ref*sin(ref_yaw);
-          y_point = x_ref*sin(ref_yaw)+y_ref*cos(ref_yaw);
-
-          x_point += ref_x;
-          y_point += ref_y;
-
-          next_x_vals.push_back(x_point);
-          next_y_vals.push_back(y_point);
-
-         }
-
-
-
-
-
+          //////////////////////////////////////////////////////////////////////////////////
+          // Populate the json message
           json msgJson;
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
