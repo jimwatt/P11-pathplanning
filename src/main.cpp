@@ -424,7 +424,7 @@ double look_if_faster_lane_is_safe(const int future_car_lane, const double futur
       break;
     }
 
-    if(abs(candidate_lane-future_car_lane)==2) {
+    if(abs(candidate_lane-future_car_lane)==2) {  // If we are trying to change two lanes at once, just move to the center lane
       candidate_lane = 1;
     } 
 
@@ -434,6 +434,7 @@ double look_if_faster_lane_is_safe(const int future_car_lane, const double futur
         
         const double threat_d = sensor_fusion[tt][6]; 
         const int threat_lane = int(threat_d/lane_width);
+                             // is this threat in the candidate lane
         if(threat_lane==candidate_lane) {  
 
           const double threat_s = sensor_fusion[tt][5];
@@ -442,10 +443,8 @@ double look_if_faster_lane_is_safe(const int future_car_lane, const double futur
           const double threat_speed = hypot(threat_vx,threat_vy);
           const double threat_future_s = threat_s + future_delta_t * threat_speed;
 
-
-                     // is this threat in the candidate lane
           const double relative_s = get_relative_s(future_car_s,threat_future_s,track_length);
-          if(relative_s>-10 and relative_s<20) {
+          if(relative_s>-14 and relative_s<24) {    // is there enough space to change lanes?
             lane_is_safe = false;
             break;
           }
