@@ -30,6 +30,8 @@ The goals / steps of this project are the following:
 
 - Done.  Please refer to the screenshot below.  At the time of the screenshot, the car had completed 23.45 miles in a time of 31 minutes and 13 seconds with no collisions or constraint violations.  This equates to an average speed of 45.1 miles per hour.
 
+![Path PLanning](./score.png)
+
 ### 3. Reflection ###
 
 **There is a reflection on how to generate paths**
