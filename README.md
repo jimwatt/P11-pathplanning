@@ -1,6 +1,6 @@
 # Path Planning
 
-![Path PLanning](/home/philip/sdc/P11-pathplanning/score.png)
+![Path Planning](score.png)
 
 This project is in conjunction with the Udacity Self-Driving Car course.  In particular, the goal of this project is to implement a path planning algorithm that allows an autonomous vehicle to safely navigate highway traffic in a simulator.
 
@@ -90,7 +90,7 @@ The goals / steps of this project are the following:
 
 - Done.  Please refer to the screenshot below.  At the time of the screenshot, the car had completed 23.45 miles in a time of 31 minutes and 13 seconds with no collisions or constraint violations.  This equates to an average speed of 45.1 miles per hour.
 
-![Path PLanning](/home/philip/sdc/P11-pathplanning/score.png)
+![Path PLanning](score.png)
 
 ### 3. Reflection
 
