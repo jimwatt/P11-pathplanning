@@ -8,7 +8,7 @@ The goals / steps of this project are the following:
 * Implement a path planning algorithm that allows an autonomous vehicle to safely navigate highway traffic in a simulator.  The planned path must ensure that no collision occurs with other vehicles, and that the ego vehicle obeys constraints on speed, acceleration, and jerk. 
 
 ## [Rubric](https://review.udacity.com/#!/rubrics/513/view) Points
-### 1. Compilation###
+### 1. Compilation
 
 **The code compiles corectly.**
 

@@ -68,7 +68,7 @@ The goals / steps of this project are the following:
 
 ## [Rubric](https://review.udacity.com/#!/rubrics/513/view) Points
 
-### 1. Compilation###
+### 1. Compilation
 
 **The code compiles corectly.**
 
